@@ -13,6 +13,7 @@ gym: 0.7.3
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import matplotlib.pyplot as plt
 
 np.random.seed(1)
 tf.set_random_seed(1)
@@ -67,7 +68,7 @@ class DeepQNetwork:
         self.cost_his = []
 
     def _build_net(self):
-        # ------------------ build evaluate_net ------------------
+        # ------------------ build evaluate_net ------------------# Behavior Network
         self.s = tf.placeholder(tf.float32, [None, self.n_features], name='s')  # input
         self.q_target = tf.placeholder(tf.float32, [None, self.n_actions], name='Q_target')  # for calculating loss
         with tf.variable_scope('eval_net'):
@@ -86,14 +87,14 @@ class DeepQNetwork:
             with tf.variable_scope('l2'):
                 w2 = tf.get_variable('w2', [n_l1, self.n_actions], initializer=w_initializer, collections=c_names)
                 b2 = tf.get_variable('b2', [1, self.n_actions], initializer=b_initializer, collections=c_names)
-                self.q_eval = tf.matmul(l1, w2) + b2
+                self.q_behavior = tf.matmul(l1, w2) + b2
 
         with tf.variable_scope('loss'):
-            self.loss = tf.reduce_mean(tf.squared_difference(self.q_target, self.q_eval))
+            self.loss = tf.reduce_mean(tf.squared_difference(self.q_target, self.q_behavior))
         with tf.variable_scope('train'):
             self._train_op = tf.train.RMSPropOptimizer(self.lr).minimize(self.loss)
 
-        # ------------------ build target_net ------------------
+        # ------------------ build target_net ------------------# Target Network
         self.s_ = tf.placeholder(tf.float32, [None, self.n_features], name='s_')    # input
         with tf.variable_scope('target_net'):
             # c_names(collections_names) are the collections to store variables
@@ -109,13 +110,13 @@ class DeepQNetwork:
             with tf.variable_scope('l2'):
                 w2 = tf.get_variable('w2', [n_l1, self.n_actions], initializer=w_initializer, collections=c_names)
                 b2 = tf.get_variable('b2', [1, self.n_actions], initializer=b_initializer, collections=c_names)
-                self.q_next = tf.matmul(l1, w2) + b2
+                self.q_target = tf.matmul(l1, w2) + b2
 
     def store_transition(self, s, a, r, s_):
         if not hasattr(self, 'memory_counter'):
             self.memory_counter = 0
 
-        transition = np.hstack((s, [a, r], s_))
+        transition = np.hstack((s, [a, r], s_)) # transition = [s, a, r, s_]
 
         # replace the old memory with new memory
         index = self.memory_counter % self.memory_size
@@ -127,9 +128,9 @@ class DeepQNetwork:
         # to have batch dimension when feed into tf placeholder
         observation = observation[np.newaxis, :]
 
-        if np.random.uniform() < self.epsilon:
+        if np.random.uniform() < self.epsilon: # choose Q_max action
             # forward feed the observation and get q value for every actions
-            actions_value = self.sess.run(self.q_eval, feed_dict={self.s: observation})
+            actions_value = self.sess.run(self.q_behavior, feed_dict={self.s: observation})
             action = np.argmax(actions_value)
         else:
             action = np.random.randint(0, self.n_actions)
@@ -137,7 +138,7 @@ class DeepQNetwork:
 
     def learn(self):
         # check to replace target parameters
-        if self.learn_step_counter % self.replace_target_iter == 0:
+        if self.learn_step_counter % self.replace_target_iter == 0: # 300次一更新
             self.sess.run(self.replace_target_op)
             print('\ntarget_params_replaced\n')
 
@@ -147,34 +148,66 @@ class DeepQNetwork:
         else:
             sample_index = np.random.choice(self.memory_counter, size=self.batch_size)
         batch_memory = self.memory[sample_index, :]
+        '''
+            >>> a = np.random.choice(3, 5)
+            a = [0 2 2 1 2]
+            so we get a uniform random from (0, self.memory_size) for size of self.bathc_size
+            batch_memory is a list of self.memory by index of item in sample_index
 
-        q_next, q_eval = self.sess.run(
-            [self.q_next, self.q_eval],
+            batch_memory = [
+                            [s1, a1, r1, s_1],
+                            [s3, a3, r3, s_3],
+                            ...
+                            [s7, a7, r7, s_7],
+                            ...
+                            ]
+
+            which s1 and s_1 are a features list for self.n_features length w.r.t s1 = [2, 3, 1, 0] contain 4 features
+        '''
+
+        q_target, q_behavior = self.sess.run(
+            [self.q_target, self.q_behavior],
             feed_dict={
                 self.s_: batch_memory[:, -self.n_features:],  # fixed params
                 self.s: batch_memory[:, :self.n_features],  # newest params
             })
+        '''
+        batch_memory = [
+                        [s1, a1, r1, s_1],
+                        [s3, a3, r3, s_3],
+                        [s7, a7, r7, s_7],
+                        ......
+                        ]
+        >>> a[:, -n_features:]
+        [s_1, s_3, s_7, ...]
 
-        # change q_target w.r.t q_eval's action
-        q_target = q_eval.copy()
+        >>> a[:, :n_features]
+        [s1, s3, s7, ...]
+        '''
+        # change q_target w.r.t q_behavior's action
+        q_target = q_behavior.copy()
 
         batch_index = np.arange(self.batch_size, dtype=np.int32)
         eval_act_index = batch_memory[:, self.n_features].astype(int)
         reward = batch_memory[:, self.n_features + 1]
-
-        q_target[batch_index, eval_act_index] = reward + self.gamma * np.max(q_next, axis=1)
+        '''
+        bathch_index = [0, 1, 2, ...]
+        eval_act_index = [a1, a3, a7, ...]
+        reward = [r1, r3, r7, ...]
+        '''
+        q_target[batch_index, eval_act_index] = reward + self.gamma * np.max(q_target, axis=1)
 
         """
         For example in this batch I have 2 samples and 3 actions:
-        q_eval =
+        q_behavior =
         [[1, 2, 3],
          [4, 5, 6]]
 
-        q_target = q_eval =
+        q_target = q_behavior =
         [[1, 2, 3],
          [4, 5, 6]]
 
-        Then change q_target with the real q_target value w.r.t the q_eval's action.
+        Then change q_target with the real q_target value w.r.t the q_behavior's action.
         For example in:
             sample 0, I took action 0, and the max q_target value is -1;
             sample 1, I took action 2, and the max q_target value is -2:
@@ -182,7 +215,7 @@ class DeepQNetwork:
         [[-1, 2, 3],
          [4, 5, -2]]
 
-        So the (q_target - q_eval) becomes:
+        So the (q_target - q_behavior) becomes:
         [[(-1)-(1), 0, 0],
          [0, 0, (-2)-(6)]]
 
@@ -201,11 +234,7 @@ class DeepQNetwork:
         self.learn_step_counter += 1
 
     def plot_cost(self):
-        import matplotlib.pyplot as plt
         plt.plot(np.arange(len(self.cost_his)), self.cost_his)
         plt.ylabel('Cost')
         plt.xlabel('training steps')
         plt.show()
-
-
-
